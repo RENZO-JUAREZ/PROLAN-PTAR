@@ -1,0 +1,1 @@
+{"name": "PROLAN Control PTAR", "short_name": "PROLAN PTAR", "start_url": "./", "display": "standalone", "background_color": "#ffffff", "theme_color": "#164d7e", "icons": [{"src": "icon.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}]}
