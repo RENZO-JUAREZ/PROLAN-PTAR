@@ -53,4 +53,91 @@ $('print').onclick=()=>{let r=sorted().filter(x=>selected.has(x.id));if(!r.lengt
 $('backup').onclick=()=>{let blob=new Blob([JSON.stringify({format:'PROLAN-PTAR',version:2,records},null,2)],{type:'application/json'});let a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='PROLAN_PTAR_respaldo_'+new Date().toISOString().slice(0,10)+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000)};
 $('restore').onchange=async e=>{try{let v=JSON.parse(await e.target.files[0].text());if(v.format!=='PROLAN-PTAR'||!Array.isArray(v.records)||v.records.some(r=>!r.id||!Array.isArray(r.rows)||r.rows.length!==20))throw Error('Formato de copia no válido');if(!confirm('¿Importar '+v.records.length+' registros? Se conservarán los registros que no estén en la copia.'))return;let m=new Map(records.map(r=>[r.id,r]));v.records.forEach(r=>m.set(r.id,r));records=[...m.values()];persist();renderHistory();alert('Copia importada')}catch(err){alert('No se pudo importar: '+err.message)}finally{e.target.value=''}};
 editor();if('serviceWorker' in navigator && location.protocol.startsWith('http'))navigator.serviceWorker.register('./sw.js').catch(()=>{});
-</script></body></html>
+</script>
+<style>
+#cloudBar{display:flex;gap:9px;align-items:center;flex-wrap:wrap}
+#loginOverlay{position:fixed;inset:0;background:linear-gradient(145deg,#093c65,#078a7b);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px}
+#loginBox{background:white;border-radius:20px;padding:30px;width:min(390px,100%);box-shadow:0 25px 80px #0019;text-align:center}
+#loginBox img{max-width:145px;max-height:85px;object-fit:contain}
+#loginBox input{display:block;width:100%;margin:12px 0;padding:13px}
+#loginBox button{width:100%;padding:13px}
+#loginError{color:#b12c3b;font-size:13px}
+</style>
+<div id="loginOverlay"><div id="loginBox"><img id="loginLogo" alt="PROLAN"><h2>PROLAN PTAR</h2><p class="muted">Acceso a registros compartidos</p><form id="cloudLogin"><input id="cloudUser" placeholder="Usuario" autocomplete="username" required><input id="cloudPass" type="password" placeholder="Contraseña" autocomplete="current-password" required><button>Iniciar sesión</button></form><p id="loginError"></p><p class="muted">Para sincronizar necesitas internet. Los registros locales siguen disponibles tras iniciar sesión.</p></div></div>
+<script>
+(()=>{'use strict';
+const URLBASE='https://nxmlqnfodnrqskkobitj.supabase.co';
+const APIKEY='sb_publishable_2PQvIF7tAZySFzDAwyXXtA_db9ER8J-';
+const USERS={renzo:'renzo.esp4@gmail.com',jean:'renzojuarez388@gmail.com',franklin:'juarezrenzo780@gmail.com',jorge:'juarezrenzo561@gmail.com'};
+const login=document.getElementById('loginOverlay'),err=document.getElementById('loginError');
+document.getElementById('loginLogo').src=logo;
+const bar=document.createElement('section');bar.className='panel no-print';bar.innerHTML='<div id="cloudBar"><strong id="cloudWho">Sin sesión</strong><span class="pill" id="cloudState">Sin sincronizar</span><button class="secondary" id="cloudRefresh">Actualizar registros</button><button class="secondary" id="cloudAudit">Ver cambios</button><button class="secondary" id="cloudLogout">Cerrar sesión</button></div><div id="cloudLog" class="muted"></div>';
+document.querySelector('main').insertBefore(bar,document.querySelector('main').firstChild);
+let session=null,username='',pending=JSON.parse(localStorage.getItem('prolan_ptar_pending_v1')||'[]');
+function status(t){document.getElementById('cloudState').textContent=t}
+function headers(extra={}){return {'apikey':APIKEY,'Authorization':'Bearer '+session.access_token,'Content-Type':'application/json',...extra}}
+async function request(path,opts={}){let r=await fetch(URLBASE+path,{...opts,headers:{...headers(),...(opts.headers||{})}});let body=await r.text(),v=body?JSON.parse(body):null;if(!r.ok)throw Error(v?.message||v?.error_description||v?.msg||body||'Error '+r.status);return v}
+function cache(){persist();localStorage.setItem('prolan_ptar_pending_v1',JSON.stringify(pending))}
+function localFromRemote(x){return {id:x.local_id||x.id,remoteId:x.id,name:x.name,date:x.reference_date,rows:x.rows_json,created:x.created_at,updated:x.updated_at}}
+async function refresh(){if(!session||!navigator.onLine)return;status('Actualizando…');try{await flush();let rows=await request('/rest/v1/ptar_registers?select=*&order=updated_at.desc&limit=500');let localOnly=records.filter(x=>!x.remoteId&&!rows.some(y=>y.local_id===x.id));let pendingIds=new Set(pending.map(x=>x.id));records=[...rows.filter(x=>!pendingIds.has(x.local_id)).map(localFromRemote),...records.filter(x=>pendingIds.has(x.id)),...localOnly];cache();renderHistory();renderExport();status('Conectado · '+rows.length+' compartidos')}catch(e){status('Error de sincronización');document.getElementById('cloudLog').textContent=e.message}}
+async function upload(rec){let existing=rec.remoteId;
+if(!existing){let matches=await request('/rest/v1/ptar_registers?select=id&local_id=eq.'+encodeURIComponent(rec.id)+'&limit=1');existing=matches?.[0]?.id}
+let body={name:rec.name,reference_date:rec.date,rows_json:rec.rows,updated_at:new Date().toISOString()};
+let saved;
+if(existing){
+ if(username!=='renzo'){
+  if(!rec.editPin)throw Error('Edición bloqueada: se requiere PIN de administrador y conexión.');
+  const result=await request('/rest/v1/rpc/ptar_update_with_pin',{method:'POST',body:JSON.stringify({p_id:existing,p_name:rec.name,p_reference_date:rec.date,p_rows_json:rec.rows,p_pin:rec.editPin})});
+  saved=[result];delete rec.editPin;
+ }else{
+  saved=await request('/rest/v1/ptar_registers?id=eq.'+existing,{method:'PATCH',headers:{Prefer:'return=representation'},body:JSON.stringify(body)});
+ }
+}
+else{saved=await request('/rest/v1/ptar_registers',{method:'POST',headers:{Prefer:'return=representation'},body:JSON.stringify({...body,register_number:rec.id,local_id:rec.id,created_by:session.user.id})});}
+if(!saved?.length)throw Error('No se confirmó el guardado remoto');
+rec.remoteId=saved[0].id;return rec}
+async function flush(){if(!session||!navigator.onLine)return;for(let item of [...pending]){let rec=records.find(r=>r.id===item.id);if(!rec){pending=pending.filter(p=>p.id!==item.id);continue}if(rec.remoteId && username!=='renzo' && !rec.editPin)throw Error('Modificación bloqueada hasta autorizar con PIN');await upload(rec);pending=pending.filter(p=>p.id!==item.id);cache()}}
+document.getElementById('cloudLogin').onsubmit=async e=>{e.preventDefault();err.textContent='';let u=document.getElementById('cloudUser').value.trim().toLowerCase(),email=USERS[u];if(!email){err.textContent='Usuario no reconocido';return}
+try{let r=await fetch(URLBASE+'/auth/v1/token?grant_type=password',{method:'POST',headers:{apikey:APIKEY,'Content-Type':'application/json'},body:JSON.stringify({email,password:document.getElementById('cloudPass').value})});let v=await r.json();if(!r.ok)throw Error(v.error_description||v.msg||'Credenciales incorrectas');session=v;username=u;document.getElementById('cloudPass').value='';login.classList.add('hidden');document.getElementById('cloudWho').textContent='Usuario: '+u;await refresh()}catch(ex){err.textContent=ex.message}};
+document.getElementById('cloudLogout').onclick=()=>{session=null;username='';login.classList.remove('hidden');status('Sin sesión')};
+document.getElementById('cloudRefresh').onclick=refresh;
+document.getElementById('cloudAudit').onclick=async()=>{try{let log=await request('/rest/v1/ptar_change_log?select=action,actor_id,changed_at,register_id&order=changed_at.desc&limit=30');document.getElementById('cloudLog').innerHTML='<h3>Últimos cambios</h3>'+(log.length?log.map(x=>'<div>'+esc(new Date(x.changed_at).toLocaleString('es-PE'))+' · '+esc(x.action)+' · Usuario ID '+esc(x.actor_id)+' · Registro '+esc(x.register_id)+'</div>').join(''):'No hay cambios registrados')}catch(e){alert(e.message)}};
+document.getElementById('save').onclick=async()=>{
+ if(!session){alert('Inicia sesión para guardar.');return}
+ const date=$('date').value;
+ if(!date){alert('Indica una fecha');return}
+ const id=currentId||('r'+Date.now()+Math.random().toString(36).slice(2,7));
+ const old=records.find(x=>x.id===id);
+ const rec={id,remoteId:old?.remoteId,date,name:$('name').value.trim()||'Registro PTAR',rows:data(),updated:new Date().toISOString(),created:old?.created||new Date().toISOString()};
+ const isExisting=!!old;
+ if(isExisting && username!=='renzo'){
+  if(!navigator.onLine){alert('La edición de registros guardados requiere internet. No se ha guardado ningún cambio.');return}
+  const pin=prompt('Autorización para editar un registro guardado. Introduce el PIN de 4 dígitos:');
+  if(pin===null)return;
+  if(!/^\d{4}$/.test(pin)){alert('PIN incorrecto. No se ha guardado ningún cambio.');return}
+  try{
+   $('saveStatus').textContent='Validando autorización con Supabase…';
+   let remoteId=rec.remoteId;
+   if(!remoteId){const matches=await request('/rest/v1/ptar_registers?select=id&local_id=eq.'+encodeURIComponent(id)+'&limit=1');remoteId=matches?.[0]?.id}
+   if(!remoteId)throw Error('No se ha encontrado el registro en Supabase. No se modificó.');
+   const saved=await request('/rest/v1/rpc/ptar_update_with_pin',{method:'POST',body:JSON.stringify({p_id:remoteId,p_name:rec.name,p_reference_date:rec.date,p_rows_json:rec.rows,p_pin:pin})});
+   if(!saved?.id)throw Error('Supabase no confirmó la modificación.');
+   rec.remoteId=saved.id;
+   records=records.filter(x=>x.id!==id);records.unshift(rec);
+   pending=pending.filter(x=>x.id!==id);
+   cache();renderHistory();renderExport();
+   $('saveStatus').textContent='Modificación autorizada y guardada en Supabase';status('Sincronizado');
+  }catch(e){$('saveStatus').textContent='Cambio rechazado: '+e.message;status('Edición no guardada');alert('No se guardaron los cambios. '+e.message)}
+  return;
+ }
+ // Los registros nuevos y las modificaciones del administrador siguen el flujo normal.
+ records=records.filter(x=>x.id!==id);records.unshift(rec);currentId=id;
+ if(!pending.some(x=>x.id===id))pending.push({id});
+ try{cache();status('Guardado local · pendiente de sincronizar');$('saveStatus').textContent='Guardado localmente. Sincronizando…';await flush();$('saveStatus').textContent=pending.some(x=>x.id===id)?'Pendiente de sincronización':'Guardado en Supabase y en este dispositivo';status(pending.length?'Pendientes: '+pending.length:'Sincronizado')}
+ catch(e){$('saveStatus').textContent='Pendiente de sincronización: '+e.message;status('Pendiente de sincronización')}
+};
+document.getElementById('historyRows').onclick=e=>{let id=e.target.dataset.open||e.target.dataset.delete;if(!id)return;if(e.target.dataset.open){editor(records.find(x=>x.id===id));tabs('editor')}else{alert('Para evitar borrar registros compartidos accidentalmente, la eliminación está desactivada en esta prueba.')}}; 
+window.addEventListener('online',()=>{if(session)refresh()});
+})();
+</script>
+</body></html>
