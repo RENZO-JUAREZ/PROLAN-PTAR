@@ -1,12 +1,12 @@
-const CACHE = 'prolan-ptar-v20261109-actualizacion';
-const OFFLINE = ['./', './index.html'];
+const CACHE = 'prolan-ptar-v20261119-usuarios';
+const OFFLINE = ['./', './index.html', './manifest.webmanifest', './icon.png'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(OFFLINE)).then(() => self.skipWaiting()));
 });
 self.addEventListener('activate', event => {
   event.waitUntil((async () => {
     const names = await caches.keys();
-    await Promise.all(names.filter(name => name !== CACHE).map(name => caches.delete(name)));
+    await Promise.all(names.filter(name => name.startsWith('prolan-ptar-') && name !== CACHE).map(name => caches.delete(name)));
     await self.clients.claim();
   })());
 });
