@@ -180,9 +180,7 @@
 </section>
 <section class="module-bar" aria-label="Secciones"><button id="moduleWater" class="module"><span>01 / CONTROL DE AGUA</span><strong>Agua tratada</strong><small>Parámetros de operación PTAR</small></button><button id="moduleChemical" class="module active"><span>02 / OPERACIÓN DIARIA</span><strong>Consumo de químicos</strong><small>Registro de cantidades por operador</small></button><button id="moduleInspection" class="module"><span>03 / INSPECCIÓN</span><strong>Inspección preoperacional</strong><small>Checklist de equipos PTAR</small></button><button id="moduleFlow" class="module"><span>04 / OPERACIÓN DIARIA</span><strong>Caudalímetros</strong><small>Caudales y volúmenes diarios</small></button></section><section class="panel"><nav><button id="new">+ Nuevo registro</button><button id="tabEdit" class="secondary">Editar formato</button><button id="tabHistory" class="secondary">Historial de registros</button><button id="tabPrint" class="secondary">Exportar PDF</button></nav></section>
 <section id="editor"><div class="section-heading"><div><small id="sectionKicker">OPERACIÓN DIARIA</small><h2 id="sectionTitle">Consumo de químicos</h2></div><span class="pill">Registro digital</span></div><div class="panel"><div class="toolbar"><label>Nombre del registro <input id="name" placeholder="Ej. Turno mañana"></label><label>Fecha de referencia <input type="date" id="date"></label><button id="save">Guardar registro</button><button id="clear" class="secondary">Vaciar formulario</button><button id="sample" class="hidden" disabled>Ejemplo</button><button id="addRows" class="secondary">+ 6 filas</button></div><div class="signing-controls">
-<select id="signRole" class="hidden" aria-label="Casilla que se firmará">
-<option value="technician">Técnico encargado</option><option value="supervisor">Visto bueno de supervisor</option>
-</select><button type="button" id="signRecord" disabled>Firmar</button><span class="muted" id="signStatus" role="status"></span></div><p class="muted" id="saveStatus">Nuevo registro sin guardar</p></div><div class="panel scroll"><div id="editableSheet"></div></div></section>
+<span class="muted" id="signRole"></span><button type="button" id="signRecord" disabled>Firmar</button><span class="muted" id="signStatus" role="status"></span></div><p class="muted" id="saveStatus">Nuevo registro sin guardar</p></div><div class="panel scroll"><div id="editableSheet"></div></div></section>
 <section id="history" class="hidden"><div class="panel"><h2>Historial de registros</h2><div class="toolbar"><input type="search" id="search" placeholder="Buscar por fecha o nombre"><button id="backup" class="secondary">Descargar copia JSON</button></div><div id="historyRows"></div></div></section>
 <section id="export" class="hidden">
   <div class="panel">
@@ -412,9 +410,11 @@ function signatureLines(record, editable, water=false) {
       const signature=record.signatures?.[role];
 
       const signedAt = signature && new Date(signature.signedAt);
-      const stamp = signature?.name && Number.isFinite(signedAt?.getTime())
-        ? `<div class="signature-stamp"><strong>${esc(signature.name)}</strong><small>${esc(signedAt.toLocaleString('es-PE',{timeZone:'America/Lima'}))}</small></div>`
-        : '';
+      const image = signatureImages.get(signature?.actor + ':' + role);
+      const validSignature = signature?.name && Number.isFinite(signedAt?.getTime());
+      const stamp = !validSignature ? '' : image
+        ? `<div class="signature-stamp"><img class="signature-image" src="data:image/png;base64,${image}" alt="Firma manuscrita de ${esc(signature.name)}"></div>`
+        : `<div class="signature-stamp"><strong>${esc(signature.name)}</strong><small>${esc(signedAt.toLocaleString('es-PE',{timeZone:'America/Lima'}))}</small></div>`;
       return `<div class="signature-slot">${stamp}<div class="signature-caption">${labels[role]}</div></div>`;
     }).join('')
   }</div>`;
@@ -426,12 +426,13 @@ function recordFields() {
   return {
     name:$('name').value.trim()||kindLabel(currentKind),
     date:$('date').value,
-    rows:data(),
+    rows:currentKind==='inspection'?[]:data(),
     observations:$('generalObservations').value,
     inspection:currentKind==='inspection'?inspectionData():undefined
   };
 }
 function comparableRows(rows) {
+  if(currentKind==='inspection')return [];
   if(currentKind!=='water'&&currentKind!=='flow')return rows;
   const lastUsed=rows.findLastIndex(row=>row.some(value=>value!=null&&value!==''));
   return rows.slice(0,lastUsed+1);
@@ -593,7 +594,7 @@ $('exportRows').onchange=event=>{
   }
 };
 
-$('print').onclick=()=>{
+$('print').onclick=async()=>{
   const kind=currentKind;
   const entries=exportRecords().filter(record=>selected.has(record.id));
   if(!entries.length){alert('Selecciona al menos un registro');return}
@@ -605,6 +606,7 @@ $('print').onclick=()=>{
     pages.push(`<div class="print-page ${kind} ${perPage===2?'two':'one'}">${content}</div>`);
   }
   $('printArea').innerHTML=pages.join('');
+  await Promise.allSettled(Array.from($('printArea').querySelectorAll('.signature-image'), image => image.decode()));
   document.body.classList.add('printing-records');
   window.print();
 };
@@ -821,6 +823,7 @@ const legacyPending = storedArray('prolan_ptar_pending_v1');
 let pending = storedArray(PENDING_KEY);
 let session = null;
 let member = null;
+let signatureImages = new Map();
 let refreshTask = null;
 let syncTask = null;
 let writing = false;
@@ -892,7 +895,8 @@ function remoteRecord(row) {
 
 function cloudPayload(record) {
   return {
-    name: record.name, reference_date: record.date, rows_json: record.rows,
+    name: record.name, reference_date: record.date,
+    rows_json: record.kind === 'inspection' ? [] : record.rows,
     format_details: {observations: record.observations || '', inspection: record.inspection}
   };
 }
@@ -953,6 +957,8 @@ async function refreshCloud() {
       collected.push(...batch.map(remoteRecord).filter(Boolean));
       if (batch.length < 500) break;
     }
+    try { await refreshSignatureImages(); }
+    catch (error) { message ||= 'No se pudieron cargar las firmas. ' + error.message; }
     const pendingRecords = pendingForMember().map(entry => entry.record);
     const pendingIds = new Set(pendingRecords.map(record => record.id));
     records = [...pendingRecords, ...collected.filter(record => !pendingIds.has(record.id))];
@@ -977,8 +983,14 @@ async function refreshCloud() {
   }
 }
 
+async function refreshSignatureImages() {
+  const rows = await cloudRequest('/ptar_signature_images?select=user_id,slot,image_base64');
+  signatureImages = new Map(rows.filter(row => /^[A-Za-z0-9+/]+={0,2}$/.test(row.image_base64))
+    .map(row => [row.user_id + ':' + row.slot, row.image_base64]));
+}
+
 function activeSigningRole() {
-  return member?.role === 'admin' ? $('signRole').value : 'technician';
+  return signatureImages.has(member?.user_id + ':supervisor') ? 'supervisor' : 'technician';
 }
 
 function signingSlotAvailable(record, role) {
@@ -993,6 +1005,7 @@ function updateSigning() {
     $('signatureSlots').outerHTML = signatureLines({signatures}, true, currentKind === 'water');
   }
   const role = activeSigningRole();
+  $('signRole').textContent = member ? signatureLabels.water[role] : '';
   const sameSigner = member && record && !signingSlotAvailable(record, role);
   $('signRecord').disabled = !member || !record?.remoteId || dirty || !!signatures?.[role] ||
     !!sameSigner || writing || !!refreshTask;
@@ -1167,6 +1180,7 @@ $('cloudLogin').onsubmit = async event => {
       encodeURIComponent(session.user.id));
     if (!profile || profile.username !== username) throw Error('El usuario no está habilitado.');
     member = profile;
+    await refreshSignatureImages();
     const priorIds = new Set(legacyPending.filter(entry => !pending.some(item => item.record.id === entry.id))
       .map(entry => entry.id));
     const legacyDrafts = previousRecords.filter(record => priorIds.has(record.id) && !record.remoteId)
@@ -1178,7 +1192,6 @@ $('cloudLogin').onsubmit = async event => {
     records = pendingForMember().map(entry => entry.record);
     $('cloudPass').value = '';
     $('cloudWho').textContent = 'Usuario: ' + username;
-    $('signRole').classList.toggle('hidden', member.role !== 'admin');
     $('loginOverlay').classList.add('hidden');
     $('app').inert = false;
     editor(null, 'water');
@@ -1187,6 +1200,7 @@ $('cloudLogin').onsubmit = async event => {
   } catch (error) {
     session = null;
     member = null;
+    signatureImages.clear();
     $('loginError').textContent = error.message;
   } finally {
     button.disabled = false;
@@ -1197,6 +1211,7 @@ $('cloudLogout').onclick = () => {
   if (writing || refreshTask || !canLeave()) return;
   session = null;
   member = null;
+  signatureImages.clear();
   selected.clear();
   records = [];
   editor(null, 'water');
@@ -1214,7 +1229,6 @@ $('cloudAudit').onclick = async () => {
         ' · ' + change.action + ' · ' + change.actor_id).join('\n') : 'Sin cambios registrados.';
   } catch (error) { alert(error.message); }
 };
-$('signRole').onchange = updateSigning;
 $('signRecord').onclick = signCurrentRecord;
 $('save').onclick = saveCloudRecord;
 window.addEventListener('online', refreshCloud);
