@@ -1,4 +1,4 @@
-const CACHE = 'prolan-ptar-v20261119-usuarios';
+const CACHE = 'prolan-ptar-v20261121-eliminar';
 const OFFLINE = ['./', './index.html', './manifest.webmanifest', './icon.png'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(OFFLINE)).then(() => self.skipWaiting()));

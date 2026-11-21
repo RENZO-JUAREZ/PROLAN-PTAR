@@ -532,10 +532,12 @@ $('new').onclick=()=>{if(!canLeave())return;editor();tabs('editor')};$('tabEdit'
 
 $('clear').onclick=()=>{if(confirm('¿Vaciar el formulario? Los registros ya guardados no se borrarán.'))editor()};
 function sorted(){return [...records].sort((a,b)=>(b.date||'').localeCompare(a.date||'')||(b.updated||'').localeCompare(a.updated||''))}
-function renderHistory(){let q=$('search').value.toLowerCase();let r=sorted().filter(x=>(x.kind||'water')===currentKind).filter(x=>(x.date+' '+x.name).toLowerCase().includes(q));$('historyRows').innerHTML=r.length?r.map(x=>`<div class="history-row"><div class="info"><strong>${esc(x.name)}</strong><div class="muted">${esc(x.date)} · Guardado: ${esc(new Date(x.updated).toLocaleString('es-PE'))}</div></div><button class="secondary" data-open="${esc(x.id)}">Abrir / editar</button><button class="danger" data-delete="${esc(x.id)}">Eliminar</button></div>`).join(''):'<p class="muted">No hay registros para mostrar.</p>'}
+function renderHistory(){let q=$('search').value.toLowerCase();let r=sorted().filter(x=>(x.kind||'water')===currentKind).filter(x=>(x.date+' '+x.name).toLowerCase().includes(q));$('historyRows').innerHTML=r.length?r.map(x=>`<div class="history-row"><div class="info"><strong>${esc(x.name)}</strong><div class="muted">${esc(x.date)} · Guardado: ${esc(new Date(x.updated).toLocaleString('es-PE'))}</div></div><button class="secondary" data-open="${esc(x.id)}">Abrir / editar</button>${member?.role === 'admin' ? `<button type="button" class="danger" data-delete="${esc(x.id)}">Eliminar</button>` : ''}</div>`).join(''):'<p class="muted">No hay registros para mostrar.</p>'}
 $('search').oninput=renderHistory;
 
 $('historyRows').onclick = event => {
+  const deleteButton = event.target.closest('button[data-delete]');
+  if (deleteButton) return deleteHistoryRecord(deleteButton.dataset.delete);
   const id = event.target.dataset.open;
   if (id && canLeave()) {
     const record = records.find(item => item.id === id);
@@ -1024,6 +1026,64 @@ async function signCurrentRecord() {
     $('saveStatus').textContent = 'Firma guardada en Supabase.';
   } catch (error) {
     alert(error.message);
+  } finally {
+    writing = false;
+    manageControls();
+  }
+}
+
+async function deleteHistoryRecord(id) {
+  if (member?.role !== 'admin') return;
+  if (writing || refreshTask) {
+    alert('Espera a que termine la sincronización.');
+    return;
+  }
+  const record = records.find(item => item.id === id);
+  if (!record) return;
+  if (!navigator.onLine) {
+    alert('Conéctate a internet para verificar y eliminar el formato.');
+    return;
+  }
+  if (currentId === id && !canLeave()) return;
+  if (!confirm('¿Eliminar el formato «' + record.name + '» del ' + record.date + '? Esta acción es definitiva.')) return;
+
+  writing = true;
+  manageControls();
+  try {
+    let remote = record;
+    if (!remote.remoteId) {
+      const matches = await cloudRequest('/ptar_registers?select=id,updated_at&limit=2&local_id=eq.' +
+        encodeURIComponent(id) + '&created_by=eq.' + encodeURIComponent(member.user_id));
+      if (matches.length > 1) throw Error('Hay más de un registro con el mismo identificador.');
+      remote = matches.length ? {remoteId: matches[0].id, updated: matches[0].updated_at} : null;
+    }
+    if (remote) {
+      const query = new URLSearchParams({select:'id', id:'eq.' + remote.remoteId, updated_at:'eq.' + remote.updated});
+      const deleted = await cloudRequest('/ptar_registers?' + query, {
+        method: 'DELETE', headers: {Prefer: 'return=representation'}
+      });
+      if (deleted?.length !== 1 || deleted[0].id !== remote.remoteId) {
+        throw Error('Supabase no confirmó el borrado. Actualiza el historial y vuelve a intentarlo.');
+      }
+    }
+    const nextPending = pending.filter(entry => entry.record.id !== id || entry.actor !== member.user_id);
+    const nextLegacy = legacyPending.filter(entry => entry.id !== id);
+    if (nextLegacy.length !== legacyPending.length) {
+      localStorage.setItem('prolan_ptar_pending_v1', JSON.stringify(nextLegacy));
+      legacyPending.splice(0, legacyPending.length, ...nextLegacy);
+    }
+    if (nextPending.length !== pending.length) {
+      localStorage.setItem(PENDING_KEY, JSON.stringify(nextPending));
+      pending = nextPending;
+    }
+    records = records.filter(item => item.id !== id);
+    selected.delete(id);
+    if (currentId === id) editor();
+    renderHistory();
+    renderExport();
+    alert('Formato eliminado.');
+  } catch (error) {
+    alert('No se pudo completar el borrado. ' + error.message);
   } finally {
     writing = false;
     manageControls();
